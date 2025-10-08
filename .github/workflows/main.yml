@@ -3,30 +3,31 @@ name: Accessibility Gate
 on:
   pull_request:
   push:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   check-a11y:
     runs-on: ubuntu-latest
     env:
-      API_URL: ${{ secrets.API_KEY }}      # e.g. https://api.example.com/a11y/check
-      API_TOKEN: ${{ secrets.A11Y_API_TOKEN }}  # if your API needs auth
-      MAX_ERRORS: "0"                           # fail if total <tr class="error"> exceeds this
-      HTML_GLOB: "index.html"                   # or "**/*.html"
-      # If your API expects raw HTML instead of JSON, set BODY_MODE=raw
-      BODY_MODE: "json"                         # json | raw
+      API_URL: ${{ secrets.API_URL }}  # <- your secret URL
+      MAX_ERRORS: "0"                  # fail if total <tr class="error"> exceeds this
+      HTML_GLOB: "index.html"          # or "**/*.html"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python parser
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install parser deps
         run: |
-          python3 -m pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install beautifulsoup4 lxml
 
       - name: Find HTML files
         id: files
-        shell: bash
         run: |
           shopt -s globstar nullglob
           files=( $HTML_GLOB )
@@ -37,147 +38,95 @@ jobs:
           printf '%s\n' "${files[@]}" > html_files.txt
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
 
+      - name: Create parser script
+        run: |
+          cat > parse_reports.py <<'PY'
+          import glob, os
+          from bs4 import BeautifulSoup
+
+          def text(el):
+              return ' '.join((el.get_text(" ", strip=True) if el else "").split())
+
+          reports = sorted(glob.glob("a11y-reports/*.html"))
+          total = 0
+          summary = []
+
+          for rp in reports:
+              with open(rp, "rb") as f:
+                  soup = BeautifulSoup(f.read(), "lxml")
+
+              # Count error rows
+              error_rows = soup.select('tr.error') + soup.select('tr[class*="error"]')
+              count = len(error_rows)
+              total += count
+
+              # Pull details if the HTMLCodeSniffer table is present
+              table = soup.find(id="test-results-table")
+              extracted = []
+              if table:
+                  for tr in table.find_all("tr"):
+                      cls = ' '.join(tr.get("class", []))
+                      if "error" in cls:
+                          tds = tr.find_all("td")
+                          principle = text(tds[1]) if len(tds) > 1 else ""
+                          message   = text(tds[2]) if len(tds) > 2 else ""
+                          code      = text(tds[3]) if len(tds) > 3 else ""
+                          extracted.append((principle, message, code))
+              else:
+                  for tr in error_rows[:10]:
+                      tds = tr.find_all("td")
+                      msg = text(tds[2]) if len(tds) > 2 else text(tr)
+                      code = text(tds[3]) if len(tds) > 3 else ""
+                      extracted.append(("", msg, code))
+
+              file_display = os.path.basename(rp)
+              summary.append(f"## {file_display}\n- Errors: **{count}**")
+              for (principle, message, code) in extracted[:10]:
+                  line = f"* {message}"
+                  if principle:
+                      line = f"* [{principle}] {message}"
+                  if code:
+                      code_short = (code[:140] + "…") if len(code) > 140 else code
+                      line += f" — `{code_short}`"
+                  summary.append(line)
+
+          with open("SUMMARY.md", "w", encoding="utf-8") as f:
+              f.write("\n".join(summary) + "\n")
+          with open("TOTAL_ERRORS.txt", "w") as f:
+              f.write(str(total))
+          PY
+
       - name: Call accessibility API and save reports
-        id: call_api
-        shell: bash
         run: |
           mkdir -p a11y-reports
           while IFS= read -r file; do
             echo "Checking: $file"
-            if [ "$BODY_MODE" = "raw" ]; then
-              response=$(curl -sS -X POST "$API_URL" \
-                -H "Content-Type: text/html" \
-                -H "Authorization: Bearer $API_TOKEN" \
-                --data-binary "@$file")
-            else
-              # JSON body: {"html": "<...>", "page": "path"}
-              html_json=$(python3 - <<'PY'
-import json,sys
-data=sys.stdin.read()
-print(json.dumps(data))
-PY
-< "$file")
-              response=$(curl -sS -X POST "$API_URL" \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $API_TOKEN" \
-                --data "{\"html\": $html_json, \"page\": \"$file\"}")
-            fi
-
-            # Save raw response (HTML or text) to file
-            # Sanitize filename to use as report name
-            safe=$(echo "$file" | tr '/' '_' | sed 's/[^A-Za-z0-9._-]/_/g')
-            report="a11y-reports/${safe}.html"
-            printf "%s" "$response" > "$report"
-            echo "Report saved to $report"
+            # URL-encode the file contents into 'source', with engine=htmlcs
+            # curl adds application/x-www-form-urlencoded automatically, but we set charset too.
+            curl -sS -X POST "$API_URL" \
+              -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+              --data-urlencode "source@$file" \
+              --data "engine=htmlcs" \
+              -o "a11y-reports/$(echo "$file" | tr '/ ' '__').html"
           done < html_files.txt
 
       - name: Parse reports and gate
-        id: parse
-        shell: bash
+        id: gate
         run: |
-          echo "# Accessibility Report" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          total_errors=0
-
-          python3 - <<'PY'
-import os, sys, glob, re
-from bs4 import BeautifulSoup
-
-reports = sorted(glob.glob("a11y-reports/*.html"))
-summary_lines = []
-ann_lines = []  # GitHub annotation lines
-
-def text(el):
-    return ' '.join((el.get_text(" ", strip=True) if el else "").split())
-
-grand_total = 0
-
-for rp in reports:
-    with open(rp, "rb") as f:
-        raw = f.read()
-
-    # Best-effort parse even if the response has text before/after the HTML
-    soup = BeautifulSoup(raw, "lxml")
-
-    # Count <tr class="error"> rows (case-insensitive, tolerate multiple classes)
-    error_rows = soup.select('tr.error') + soup.select('tr[class*="error"]')
-    count = len(error_rows)
-    grand_total += count
-
-    # Try to extract details if it's the HTMLCodeSniffer table format
-    table = soup.find(id="test-results-table")
-    extracted = []
-    if table:
-        for tr in table.find_all("tr"):
-            cls = ' '.join(tr.get("class", []))
-            if "error" in cls:
-                tds = tr.find_all("td")
-                # Expected columns: Error Level | Principle | Message | Code snippet | Techniques
-                principle = text(tds[1]) if len(tds) > 1 else ""
-                message = text(tds[2]) if len(tds) > 2 else ""
-                code = text(tds[3]) if len(tds) > 3 else ""
-                extracted.append((principle, message, code))
-    else:
-        # Fallback: try to extract messages from common patterns
-        # (very defensive; won’t crash if not present)
-        for tr in error_rows[:10]:
-            tds = tr.find_all("td")
-            msg = text(tds[2]) if len(tds) > 2 else text(tr)
-            code = text(tds[3]) if len(tds) > 3 else ""
-            extracted.append(("", msg, code))
-
-    # Append to summary (limit top 10 per file)
-    file_display = os.path.basename(rp).replace(".html","")
-    summary_lines.append(f"## {file_display}\n- Errors: **{count}**")
-    for (principle, message, code) in extracted[:10]:
-        line = f"* {message}"
-        if principle:
-            line = f"* [{principle}] {message}"
-        if code:
-            # keep code snippet short
-            code_short = (code[:140] + "…") if len(code) > 140 else code
-            line += f" — `{code_short}`"
-        summary_lines.append(line)
-
-    # Annotations (surface in the Checks UI)
-    for (principle, message, code) in extracted[:5]:
-        base = f"{message}"
-        if principle:
-            base = f"{principle}: {message}"
-        ann = f"::warning title=A11y error::{base}"
-        if code:
-            ann += f" — {code[:200]}"
-        ann_lines.append(ann)
-
-# Print summary to $GITHUB_STEP_SUMMARY
-print("\n".join(summary_lines))
-
-# Emit annotations to stdout (picked up by Actions)
-for a in ann_lines:
-    print(a)
-
-# Write output for next step
-print(f"total_errors={grand_total}")
-PY
-          | tee parse_output.txt
-
-          # Extract total from the script’s final line
-          total_errors=$(grep -oE 'total_errors=[0-9]+' parse_output.txt | tail -n1 | cut -d= -f2)
-          : "${total_errors:=0}"
-
+          python parse_reports.py
+          cat SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          total_errors=$(cat TOTAL_ERRORS.txt)
+          echo "total_errors=$total_errors" >> "$GITHUB_OUTPUT"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Total errors across files: $total_errors**" >> "$GITHUB_STEP_SUMMARY"
           echo "**Fail threshold (MAX_ERRORS): ${MAX_ERRORS}**" >> "$GITHUB_STEP_SUMMARY"
-          echo "total_errors=$total_errors" >> "$GITHUB_OUTPUT"
-
           if [ "$total_errors" -gt "$MAX_ERRORS" ]; then
             echo "::error title=Accessibility gate failed::Found $total_errors errors (max allowed: $MAX_ERRORS)"
             exit 1
           fi
-          echo "Accessibility gate passed: $total_errors ≤ $MAX_ERRORS"
+          echo "Accessibility gate passed"
 
-      - name: Upload full HTML reports (artifact)
+      - name: Upload HTML reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
