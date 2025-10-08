@@ -6,12 +6,12 @@ on:
     branches: [main]
 
 jobs:
-  check-a11y:
+  check-accessibility:
     runs-on: ubuntu-latest
     env:
-      API_URL: ${{ secrets.API_URL }}  # <- your secret URL
+      API_URL: ${{ secrets.API_URL }}  # <-- set this repo secret
       MAX_ERRORS: "0"                  # fail if total <tr class="error"> exceeds this
-      HTML_GLOB: "index.html"          # or "**/*.html"
+      HTML_GLOB: "index.html"          # or "**/*.html" to scan multiple files
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
           def text(el):
               return ' '.join((el.get_text(" ", strip=True) if el else "").split())
 
-          reports = sorted(glob.glob("a11y-reports/*.html"))
+          reports = sorted(glob.glob("accessibility-reports/*.html"))
           total = 0
           summary = []
 
@@ -55,18 +55,18 @@ jobs:
               with open(rp, "rb") as f:
                   soup = BeautifulSoup(f.read(), "lxml")
 
-              # Count error rows
+              # Count <tr class="error"> rows (also tolerate multi-class rows)
               error_rows = soup.select('tr.error') + soup.select('tr[class*="error"]')
               count = len(error_rows)
               total += count
 
-              # Pull details if the HTMLCodeSniffer table is present
+              # Pull details if the HTMLCodeSniffer-style table is present
               table = soup.find(id="test-results-table")
               extracted = []
               if table:
                   for tr in table.find_all("tr"):
-                      cls = ' '.join(tr.get("class", []))
-                      if "error" in cls:
+                      classes = ' '.join(tr.get("class", []))
+                      if "error" in classes:
                           tds = tr.find_all("td")
                           principle = text(tds[1]) if len(tds) > 1 else ""
                           message   = text(tds[2]) if len(tds) > 2 else ""
@@ -98,16 +98,20 @@ jobs:
 
       - name: Call accessibility API and save reports
         run: |
-          mkdir -p a11y-reports
+          mkdir -p accessibility-reports
           while IFS= read -r file; do
             echo "Checking: $file"
-            # URL-encode the file contents into 'source', with engine=htmlcs
-            # curl adds application/x-www-form-urlencoded automatically, but we set charset too.
+
+            # URL-encode file contents safely via Python (no heredoc needed)
+            encoded=$(python -c 'import sys,urllib.parse,pathlib; p=pathlib.Path(sys.argv[1]); print(urllib.parse.quote_plus(p.read_text(encoding="utf-8",errors="replace")))' "$file")
+
+            # Send as application/x-www-form-urlencoded: source=<encoded>&engine=htmlcs
             curl -sS -X POST "$API_URL" \
               -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-              --data-urlencode "source@$file" \
+              --data "source=$encoded" \
               --data "engine=htmlcs" \
-              -o "a11y-reports/$(echo "$file" | tr '/ ' '__').html"
+              -o "accessibility-reports/$(echo "$file" | tr '/ ' '__').html"
+
           done < html_files.txt
 
       - name: Parse reports and gate
@@ -130,5 +134,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: a11y-html-reports
-          path: a11y-reports/
+          name: accessibility-html-reports
+          path: accessibility-reports/
