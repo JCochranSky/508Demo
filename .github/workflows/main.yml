@@ -9,9 +9,9 @@ jobs:
   check-accessibility:
     runs-on: ubuntu-latest
     env:
-      API_URL: ${{ secrets.API_URL }}  # <-- set this repo secret
-      MAX_ERRORS: "0"                  # fail if total <tr class="error"> exceeds this
-      HTML_GLOB: "index.html"          # or "**/*.html" to scan multiple files
+      API_URL: ${{ secrets.API_URL }}
+      MAX_ERRORS: "0"
+      HTML_GLOB: "**/*.html"   # scan all HTML files (or set to "DemoHTML.html")
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,6 +36,8 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${files[@]}" > html_files.txt
+          echo "Found ${#files[@]} HTML file(s):"
+          cat html_files.txt
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
 
       - name: Create parser script
@@ -55,12 +57,10 @@ jobs:
               with open(rp, "rb") as f:
                   soup = BeautifulSoup(f.read(), "lxml")
 
-              # Count <tr class="error"> rows (also tolerate multi-class rows)
               error_rows = soup.select('tr.error') + soup.select('tr[class*="error"]')
               count = len(error_rows)
               total += count
 
-              # Pull details if the HTMLCodeSniffer-style table is present
               table = soup.find(id="test-results-table")
               extracted = []
               if table:
@@ -101,17 +101,12 @@ jobs:
           mkdir -p accessibility-reports
           while IFS= read -r file; do
             echo "Checking: $file"
-
-            # URL-encode file contents safely via Python (no heredoc needed)
             encoded=$(python -c 'import sys,urllib.parse,pathlib; p=pathlib.Path(sys.argv[1]); print(urllib.parse.quote_plus(p.read_text(encoding="utf-8",errors="replace")))' "$file")
-
-            # Send as application/x-www-form-urlencoded: source=<encoded>&engine=htmlcs
             curl -sS -X POST "$API_URL" \
               -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
               --data "source=$encoded" \
               --data "engine=htmlcs" \
               -o "accessibility-reports/$(echo "$file" | tr '/ ' '__').html"
-
           done < html_files.txt
 
       - name: Parse reports and gate
