@@ -9,7 +9,7 @@ jobs:
   check-a11y:
     runs-on: ubuntu-latest
     env:
-      API_URL: ${{ secrets.A11Y_API_URL }}      # e.g. https://api.example.com/a11y/check
+      API_URL: ${{ secrets.API_KEY }}      # e.g. https://api.example.com/a11y/check
       API_TOKEN: ${{ secrets.A11Y_API_TOKEN }}  # if your API needs auth
       MAX_ERRORS: "0"                           # fail if total <tr class="error"> exceeds this
       HTML_GLOB: "index.html"                   # or "**/*.html"
