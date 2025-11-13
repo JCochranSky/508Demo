@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
 
+
 jobs:
   check-accessibility:
     runs-on: ubuntu-latest
