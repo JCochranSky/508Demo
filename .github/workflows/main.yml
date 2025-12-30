@@ -108,7 +108,7 @@ jobs:
               -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
               --data "source=$encoded" \
               --data "engine=htmlcs" \
-              -o "accessibility-reports/$(echo "$file" | tr '/ ' '__').html"
+              -o "accessibility-reports/$(echo "$file" | tr '/ ' '__')"
           done < html_files.txt
 
       - name: Parse reports and gate
